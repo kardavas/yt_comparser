@@ -64,7 +64,8 @@ def get_comments(video_id, video_title, youtube):
             response = request.execute()
             for item in response['items']:
                 comment = item['snippet']['topLevelComment']['snippet']['textDisplay']
-                comments.append((comment, video_title))
+                author = item['snippet']['topLevelComment']['snippet']['authorDisplayName']
+                comments.append((comment, video_title, author))
                 if len(comments) >= 5000:
                     break
             logger.info(f'Fetched {len(response["items"])} comments from page {page_count}')
@@ -85,9 +86,9 @@ def get_comments(video_id, video_title, youtube):
 def save_to_csv(comments, filename):
     with open(filename, 'w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
-        writer.writerow(['Comment', 'Video Title'])
-        for comment, video_title in comments:
-            writer.writerow([comment, video_title])
+        writer.writerow(['Comment', 'Video Title', 'Author'])
+        for comment, video_title, author in comments:
+            writer.writerow([comment, video_title, author])
 
 async def handle_message(update: Update, context: CallbackContext) -> None:
     try:
@@ -137,13 +138,20 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
             # Проверка существования файла перед отправкой
             if not os.path.exists(filename):
                 logger.error(f'File not found: {filename}')
-                await update.message.reply_text('Ошибка: файл с комментариями не найден.')
+                await update.message.reply_text(f'Ошибка: файл {filename} не найден.')
                 return
+
+            # Логирование перед отправкой файла
+            logger.info(f'Attempting to send file: {filename}')
 
             # Отправка файла в диалог
             with open(filename, 'rb') as file:
-                logger.info(f'Sending file: {filename}')
-                await update.message.reply_document(document=InputFile(file), filename=filename)
+                try:
+                    await update.message.reply_document(document=InputFile(file), filename=filename)
+                    logger.info(f'File {filename} successfully sent.')
+                except Exception as e:
+                    logger.error(f'Error sending file {filename}: {e}')
+                    await update.message.reply_text(f'Ошибка при отправке файла {filename}.')
         else:
             logger.warning('Invalid YouTube channel link received.')
             await update.message.reply_text('Пожалуйста, отправьте корректную ссылку на канал YouTube.')
