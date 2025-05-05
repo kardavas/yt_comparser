@@ -1,7 +1,7 @@
 import logging
 import csv
 import traceback
-from telegram import Update
+from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, CallbackContext
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
@@ -25,16 +25,23 @@ async def start(update: Update, context: CallbackContext) -> None:
 
 def get_channel_videos(channel_id):
     youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
+    video_ids = []
     try:
         request = youtube.search().list(
             part='snippet',
             channelId=channel_id,
-            maxResults=5,
+            maxResults=50,  # Максимальное количество видео за один запрос
             order='date'
         )
-        response = request.execute()
-        video_ids = [item['id']['videoId'] for item in response['items'] if item['id']['kind'] == 'youtube#video']
-        logger.info(f'Video IDs fetched: {video_ids}')
+
+        while request and len(video_ids) < 5000:  # Продолжаем, пока не наберем достаточно видео
+            response = request.execute()
+            video_ids.extend(
+                [item['id']['videoId'] for item in response['items'] if item['id']['kind'] == 'youtube#video']
+            )
+            request = youtube.search().list_next(request, response)
+
+        logger.info(f'Total video IDs fetched: {len(video_ids)}')
         return video_ids
     except Exception as e:
         logger.error(f'Error fetching videos for channel {channel_id}: {e}')
@@ -50,12 +57,22 @@ def get_comments(video_id, video_title, youtube):
             maxResults=100
         )
 
-        while request:
+        page_count = 0  # Счётчик страниц
+        while request and len(comments) < 5000:  # Ограничение на 5000 комментариев
+            page_count += 1
+            logger.info(f'Fetching page {page_count} of comments for video ID {video_id}')
             response = request.execute()
             for item in response['items']:
                 comment = item['snippet']['topLevelComment']['snippet']['textDisplay']
                 comments.append((comment, video_title))
+                if len(comments) >= 5000:
+                    break
+            logger.info(f'Fetched {len(response["items"])} comments from page {page_count}')
+            # Получение следующей страницы комментариев
             request = youtube.commentThreads().list_next(request, response)
+
+        logger.info(f'Total comments fetched for video ID {video_id}: {len(comments)}')
+
     except Exception as e:
         logger.error(f'Error fetching comments for video ID {video_id}: {e}')
         if 'commentsDisabled' in str(e):
@@ -105,12 +122,28 @@ async def handle_message(update: Update, context: CallbackContext) -> None:
                 await update.message.reply_text('Не удалось найти комментарии к видео.')
                 return
 
-            filename = f'comments_{channel_id}.csv'
+            # Получение названия канала
+            channel_title = youtube.channels().list(
+                part='snippet',
+                id=channel_id
+            ).execute()['items'][0]['snippet']['title']
+
+            # Формирование имени файла с названием канала
+            filename = f'{channel_title}_comments_{channel_id}.csv'
             logger.info(f'Saving comments to file: {filename}')
             save_to_csv(all_comments, filename)
             logger.info(f'Comments successfully saved to file: {filename}')
 
-            await update.message.reply_text(f'Комментарии сохранены в файл {filename}')
+            # Проверка существования файла перед отправкой
+            if not os.path.exists(filename):
+                logger.error(f'File not found: {filename}')
+                await update.message.reply_text('Ошибка: файл с комментариями не найден.')
+                return
+
+            # Отправка файла в диалог
+            with open(filename, 'rb') as file:
+                logger.info(f'Sending file: {filename}')
+                await update.message.reply_document(document=InputFile(file), filename=filename)
         else:
             logger.warning('Invalid YouTube channel link received.')
             await update.message.reply_text('Пожалуйста, отправьте корректную ссылку на канал YouTube.')
@@ -172,7 +205,14 @@ async def parse(update: Update, context: CallbackContext) -> None:
                 await update.message.reply_text('Не удалось найти подходящие видео с комментариями.')
                 return
 
-            filename = f'comments_{channel_id}.csv'
+            # Получение названия канала
+            channel_title = youtube.channels().list(
+                part='snippet',
+                id=channel_id
+            ).execute()['items'][0]['snippet']['title']
+
+            # Формирование имени файла с названием канала
+            filename = f'{channel_title}_comments_{channel_id}.csv'
             try:
                 logger.info(f'Saving comments to file: {filename}')
                 save_to_csv(all_comments[:5000], filename)
